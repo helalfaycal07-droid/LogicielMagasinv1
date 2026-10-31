@@ -266,3 +266,65 @@ class ImeiInterfaceTests(unittest.TestCase):
         self.assertEqual(len(d.lignes), 1)
         self.assertEqual((d.lignes[0]["customer_name"], d.lignes[0]["sale_number"], d.lignes[0]["status"]),
                          ("Client Démo", "VTE-000001", "vendu"))
+
+
+@unittest.skipUnless(PYSIDE_OK, "PySide6 n'est pas installé")
+class SuppressionInterfaceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        import interface.page_produits as module
+        from interface.fenetre_principale import FenetrePrincipale
+        self.module = module
+        self.ancienne_confirmation = module.demander_confirmation
+        self.questions = []
+        module.demander_confirmation = lambda parent, titre, texte: (self.questions.append((titre, texte)) or True)
+        self.conn = connect(":memory:")
+        remplir_demo(self.conn)
+        self.fenetre = FenetrePrincipale(self.conn, "Test")
+        self.page = self.fenetre.page_produits
+
+    def tearDown(self):
+        self.module.demander_confirmation = self.ancienne_confirmation
+
+    def choisir(self, reference):
+        for r in range(self.page.tableau.rowCount()):
+            if self.page.tableau.item(r, 0).text() == reference:
+                self.page.tableau.selectRow(r)
+                return
+
+    def references(self):
+        return {self.page.tableau.item(r, 0).text() for r in range(self.page.tableau.rowCount())}
+
+    def test_un_produit_sans_historique_est_supprime_pour_de_bon(self):
+        self.choisir("102")                                   # téléviseur sans vente
+        self.page.bouton_supprimer.click()
+        self.assertEqual(self.questions[0][0], "Supprimer le produit")
+        self.assertNotIn("102", self.references())
+        self.page.voir_archives.setChecked(True)               # il n'est pas non plus dans les archivés
+        self.assertEqual(self.references(), set())
+
+    def test_un_produit_vendu_est_archive_puis_restaure(self):
+        self.choisir("106")                                   # smartphone déjà vendu dans la démonstration
+        self.page.bouton_supprimer.click()
+        self.assertEqual(self.questions[0][0], "Retirer de la liste")
+        self.assertIn("historique", self.questions[0][1])
+        self.assertNotIn("106", self.references())
+        self.page.voir_archives.setChecked(True)
+        self.assertEqual(self.references(), {"106"})
+        self.assertEqual(self.page.bouton_supprimer.text(), "Restaurer")
+        self.choisir("106")
+        self.assertFalse(self.page.bouton_modifier.isEnabled())   # archivé : consultation seulement
+        self.assertTrue(self.page.bouton_mouvements.isEnabled())
+        self.page.bouton_supprimer.click()                      # Restaurer
+        self.assertEqual(self.references(), set())
+        self.page.voir_archives.setChecked(False)
+        self.assertIn("106", self.references())
+
+    def test_refus_de_la_confirmation_ne_change_rien(self):
+        self.module.demander_confirmation = lambda *a, **k: False
+        self.choisir("102")
+        self.page.bouton_supprimer.click()
+        self.assertIn("102", self.references())

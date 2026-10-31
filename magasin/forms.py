@@ -44,7 +44,7 @@ def parse_product_form(*, reference: str, name: str, price_text: str, cost_text:
     initial_stock = parse_int(initial_stock_text, "Stock initial")
     if track_serial and initial_stock:
         raise ValidationError("Un produit suivi par IMEI n'a pas de stock initial : ajoutez ensuite les "
-                              "appareils avec le bouton « Appareils (IMEI) ».")
+                              "appareils avec le bouton « Appareils IMEI ».")
     return {
         "reference": reference.strip(), "name": name.strip(), "price_centimes": price,
         "cost_centimes": cost, "barcode": barcode.strip() or None,

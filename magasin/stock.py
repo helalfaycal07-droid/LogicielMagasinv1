@@ -66,7 +66,7 @@ def inventory_count(conn, product_id: int, counted: int, note: str | None = None
     if tracked and tracked["track_serial"]:
         raise ValidationError(
             f"« {tracked['name']} » est suivi par IMEI : ajoutez ou sortez les appareils un par un "
-            "(bouton « Appareils (IMEI) »), le stock se met à jour tout seul.")
+            "(bouton « Appareils IMEI »), le stock se met à jour tout seul.")
     difference = counted - stock_of(conn, product_id, warehouse_id)
     if difference == 0:
         return None

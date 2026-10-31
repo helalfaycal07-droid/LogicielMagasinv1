@@ -1,9 +1,9 @@
-# Logiciel de gestion de magasin (version 0.3.1)
+# Logiciel de gestion de magasin (version 0.3.2)
 
 Le **cœur du logiciel** (hors ligne, Python seul) et une **première fenêtre** : l'écran Produits et stock.
 Les fenêtres demandent PySide6 (installé automatiquement par test_fenetre.py).
 
-## Ce qui est déjà fait et testé (97 tests)
+## Ce qui est déjà fait et testé (107 tests)
 - Montants exacts en centimes, affichage « 39 000,00 DA », répartition des mensualités
   (la dernière absorbe l'arrondi), calcul HT / TVA / TTC, majoration et marge séparées.
 - Base SQLite locale avec migrations, numéros lisibles (VTE-000001, REC-000001, DOS-00001...).
@@ -26,7 +26,8 @@ Les fenêtres demandent PySide6 (installé automatiquement par test_fenetre.py).
 - Contrôle d'intégrité (stock, caisse, IMEI).
 - **Écran Produits et stock** : liste avec recherche, stock bas ou négatif en couleur, nouveau produit
   (prix TTC/HT, majoration et marge en direct), **modification d'un produit** (chaque changement est
-  écrit au journal ; le stock se corrige par l'inventaire), inventaire, mouvements de stock, archivage.
+  écrit au journal ; le stock se corrige par l'inventaire), inventaire, mouvements de stock, suppression d'un produit créé par erreur (définitive), ou retrait de la liste (archivage, restaurable) si
+  le produit a déjà un historique.
 
 ## Ce qui n'est pas encore fait
 Écrans vente rapide, caisse, clients et crédit, achats et réceptions, retours et avoirs, documents imprimables (ticket, facture,
@@ -35,7 +36,7 @@ devis), étiquette de dossier, sauvegarde et restauration, import de l'Excel act
 ## Lancer avec VS Code (bouton ▶ sur le fichier)
 - `app_demo.py` : le logiciel avec des données FICTIVES, rien n'est enregistré (à essayer en premier).
 - `app.py` : le logiciel avec vos données (base dans `%LOCALAPPDATA%\LogicielMagasin\magasin.db`).
-- `lancer_tests.py` : lance les 97 tests.  `demo.py` : scénario en texte.  `test_fenetre.py` : test de PySide6.
+- `lancer_tests.py` : lance les 107 tests.  `demo.py` : scénario en texte.  `test_fenetre.py` : test de PySide6.
 
 ## Lancer avec PowerShell (facultatif)
 ```powershell

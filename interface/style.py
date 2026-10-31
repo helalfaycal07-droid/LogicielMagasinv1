@@ -14,7 +14,7 @@ QLabel#note_menu {{ color: #9ca3af; padding: 10px 16px; font-size: 9pt; }}
 QLabel#titre {{ font-size: 18pt; font-weight: bold; color: #111827; }}
 QLabel#info {{ color: #4b5563; }}
 QLineEdit, QComboBox, QSpinBox {{ padding: 6px; border: 1px solid #cbd5e1; border-radius: 4px; background: white; }}
-QPushButton {{ padding: 8px 14px; border: 1px solid #cbd5e1; border-radius: 4px; background: white; }}
+QPushButton {{ padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 4px; background: white; }}
 QPushButton:hover {{ background: #eef2f7; }}
 QPushButton#principal {{ background: {COULEUR_PRINCIPALE}; color: white; border: none; font-weight: bold; }}
 QPushButton#principal:hover {{ background: #c2410c; }}
