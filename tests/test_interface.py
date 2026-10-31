@@ -54,11 +54,17 @@ class PageProduitsTests(unittest.TestCase):
         self.page.tableau.selectRow(0)
         self.assertTrue(self.page.bouton_inventaire.isEnabled())
 
-    def test_le_menu_ne_propose_que_les_ecrans_termines(self):
+    def test_le_menu_active_les_ecrans_termines(self):
         from PySide6.QtCore import Qt
         actifs = [self.fenetre.menu.item(i).text() for i in range(self.fenetre.menu.count())
                   if self.fenetre.menu.item(i).flags() & Qt.ItemIsEnabled]
-        self.assertEqual(actifs, ["Produits et stock"])
+        self.assertEqual(actifs, ["Produits et stock", "Vente rapide"])
+
+    def test_vente_rapide_affiche_la_page_associee(self):
+        from interface.page_vente_rapide import PageVenteRapide
+        self.fenetre.menu.setCurrentRow(1)
+        self.assertIsInstance(self.fenetre.pile.currentWidget(), PageVenteRapide)
+        self.assertIs(self.fenetre.pile.currentWidget(), self.fenetre.page_vente_rapide)
 
 
 if __name__ == "__main__":

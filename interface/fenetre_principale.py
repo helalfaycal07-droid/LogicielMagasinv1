@@ -5,12 +5,13 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QListWidget, QListWidgetItem
                                QVBoxLayout, QWidget)
 
 from .page_produits import PageProduits
+from .page_vente_rapide import PageVenteRapide
 from .style import FEUILLE_DE_STYLE
 
 # (libellé, écran disponible ?)
 MENU = [
     ("Produits et stock", True),
-    ("Vente rapide", False),
+    ("Vente rapide", True),
     ("Caisse", False),
     ("Clients et crédit", False),
     ("Achats", False),
@@ -38,6 +39,8 @@ class FenetrePrincipale(QMainWindow):
         self.pile = QStackedWidget()
         self.page_produits = PageProduits(conn)
         self.pile.addWidget(self.page_produits)
+        self.page_vente_rapide = PageVenteRapide(conn)
+        self.pile.addWidget(self.page_vente_rapide)
         self.menu.currentRowChanged.connect(self._changer_page)
         self.menu.setCurrentRow(0)
 
@@ -66,3 +69,5 @@ class FenetrePrincipale(QMainWindow):
             self.pile.setCurrentIndex(ligne)
             if ligne == 0:
                 self.page_produits.rafraichir()
+            elif ligne == 1:
+                self.page_vente_rapide.rafraichir()
