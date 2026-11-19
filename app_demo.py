@@ -12,9 +12,15 @@ from magasin.demo_data import remplir_demo
 
 def main() -> int:
     conn = connect(":memory:")
-    remplir_demo(conn)
-    return lancer(conn, "Gestion de magasin — DÉMONSTRATION",
-                  "MODE DÉMONSTRATION : données fictives, rien n'est enregistré")
+    try:
+        remplir_demo(conn)
+        return lancer(
+            conn,
+            "Gestion de magasin — DÉMONSTRATION",
+            "MODE DÉMONSTRATION : données fictives, rien n'est enregistré",
+        )
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

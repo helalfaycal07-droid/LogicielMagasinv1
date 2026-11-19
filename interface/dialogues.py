@@ -2,7 +2,7 @@
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
-                               QHeaderView, QLabel, QLineEdit, QPushButton, QSpinBox, QTableWidget,
+                               QComboBox, QHeaderView, QLabel, QLineEdit, QPushButton, QSpinBox, QTableWidget,
                                QTableWidgetItem, QVBoxLayout)
 
 from magasin.clock import format_dt
@@ -10,6 +10,8 @@ from magasin.errors import MagasinError, ValidationError
 from magasin.forms import parse_product_form
 from magasin.money import centimes_to_text, da_to_centimes, format_da, margin_percent, markup_percent, split_ttc
 from magasin.stock import list_movements
+from magasin.supplier_links import product_suppliers
+from magasin.purchases import list_suppliers
 
 from .outils import TYPES_MOUVEMENT, montrer_erreur
 
@@ -126,7 +128,7 @@ class NouveauProduitDialogue(QDialog):
 class ModifierProduitDialogue(NouveauProduitDialogue):
     """Correction d'un produit existant (prix, nom, TVA...). Le stock se corrige par l'inventaire."""
 
-    def __init__(self, parent, produit: dict):
+    def __init__(self, parent, produit: dict, conn):
         super().__init__(parent, produit["reference"])
         self.setWindowTitle(f"Modifier le produit — {produit['name']}")
         self.nom.setText(produit["name"])
@@ -139,6 +141,30 @@ class ModifierProduitDialogue(NouveauProduitDialogue):
         self.tva.setText(centimes_to_text(produit["tax_rate_bp"]))
         self.stock_min.setText(str(produit["min_stock"]))
         self.suivi_imei.setChecked(produit["track_serial"])
+        fournisseurs_lies = product_suppliers(conn, produit["id"])
+        ids_existants = {fournisseur["id"] for fournisseur in fournisseurs_lies}
+        self.fournisseur = QComboBox()
+        if len(fournisseurs_lies) > 1:
+            self.fournisseur.addItem(
+                "Plusieurs fournisseurs — ne pas modifier", None
+            )
+        self.fournisseur.addItem("Aucun fournisseur", 0)
+        fournisseurs = list_suppliers(conn)
+        for fournisseur in fournisseurs:
+            if fournisseur["active"] or fournisseur["id"] in ids_existants:
+                libelle = fournisseur["name"]
+                if not fournisseur["active"]:
+                    libelle += " (archivé)"
+                self.fournisseur.addItem(libelle, fournisseur["id"])
+        if len(fournisseurs_lies) == 1:
+            self.fournisseur.setCurrentIndex(
+                self.fournisseur.findData(fournisseurs_lies[0]["id"])
+            )
+        elif len(fournisseurs_lies) > 1:
+            self.fournisseur.setCurrentIndex(0)
+        else:
+            self.fournisseur.setCurrentIndex(self.fournisseur.findData(0))
+        self.formulaire.addRow("Fournisseur", self.fournisseur)
         if produit["stock"] != 0 or produit["track_serial"]:
             self.suivi_imei.setEnabled(False)  # ne change que lorsque le stock est à 0 et sans appareil
             self.suivi_imei.setToolTip("Le suivi par IMEI ne peut changer que lorsque le stock est à 0.")
@@ -149,6 +175,11 @@ class ModifierProduitDialogue(NouveauProduitDialogue):
         note.setWordWrap(True)
         self.formulaire.addRow("", note)
         self._mettre_a_jour_indicateurs()
+
+    def _valider(self) -> None:
+        super()._valider()
+        if self.valeurs is not None:
+            self.valeurs["supplier_id"] = self.fournisseur.currentData()
 
 
 class InventaireDialogue(QDialog):

@@ -10,6 +10,7 @@ Règles :
 from .clock import now_iso
 from .db import log_audit, transaction
 from .errors import DifferenceNeedsReason, NoOpenSession, SessionAlreadyOpen, ValidationError
+from .users import require_permission
 
 DEFAULT_REGISTER = 1
 _NOT_COUNTED = ("ouverture", "fermeture")
@@ -50,7 +51,8 @@ def expected_balance(conn, session_id: int) -> int:
 
 
 def open_session(conn, register_id: int = DEFAULT_REGISTER, opening_centimes: int | None = None,
-                 at: str | None = None) -> int:
+                 at: str | None = None, actor_user_id: int | None = None) -> int:
+    require_permission(conn, actor_user_id, "cash_open")
     at = at or now_iso()
     with transaction(conn):
         if current_session(conn, register_id):
@@ -69,7 +71,8 @@ def open_session(conn, register_id: int = DEFAULT_REGISTER, opening_centimes: in
             "balance_after, description, created_at) VALUES (?, 'ouverture', 0, ?, ?, 'Ouverture de caisse', ?)",
             (session_id, opening_centimes, opening_centimes, at),
         )
-        log_audit(conn, "caisse_ouverte", "cash_sessions", session_id, str(opening_centimes), at)
+        log_audit(conn, "caisse_ouverte", "cash_sessions", session_id,
+                  str(opening_centimes), at, actor_user_id)
     return session_id
 
 
@@ -96,11 +99,19 @@ def add_cash_movement(conn, session_id: int, kind: str, amount_centimes: int, *,
 
 
 def record_expense(conn, session_id: int, amount_centimes: int, description: str,
-                   at: str | None = None) -> int:
+                   at: str | None = None, actor_user_id: int | None = None) -> int:
+    require_permission(conn, actor_user_id, "cash_expense")
     if amount_centimes <= 0 or not description.strip():
         raise ValidationError("Une dépense a besoin d'un montant positif et d'une description.")
-    return add_cash_movement(conn, session_id, "depense", -amount_centimes,
-                             description=description, at=at)
+    movement_id = add_cash_movement(
+        conn, session_id, "depense", -amount_centimes,
+        description=description, at=at,
+    )
+    log_audit(
+        conn, "depense_caisse", "cash_movements", movement_id,
+        f"{amount_centimes} — {description.strip()}", at, actor_user_id,
+    )
+    return movement_id
 
 
 def session_summary(conn, session_id: int) -> dict:
@@ -117,8 +128,9 @@ def session_summary(conn, session_id: int) -> dict:
 
 
 def close_session(conn, session_id: int, counted_centimes: int, reason: str | None = None,
-                  at: str | None = None) -> dict:
+                  at: str | None = None, actor_user_id: int | None = None) -> dict:
     """Ferme la session. Un écart (manque ou excédent) exige une raison écrite."""
+    require_permission(conn, actor_user_id, "cash_close")
     at = at or now_iso()
     with transaction(conn):
         session = conn.execute("SELECT * FROM cash_sessions WHERE id = ?", (session_id,)).fetchone()
@@ -141,5 +153,6 @@ def close_session(conn, session_id: int, counted_centimes: int, reason: str | No
             (session_id, expected, counted_centimes,
              f"Fermeture : attendu {expected}, compté {counted_centimes}, écart {difference}", at),
         )
-        log_audit(conn, "caisse_fermee", "cash_sessions", session_id, f"ecart={difference}", at)
+        log_audit(conn, "caisse_fermee", "cash_sessions", session_id,
+                  f"ecart={difference}", at, actor_user_id)
     return {"expected": expected, "counted": counted_centimes, "difference": difference}

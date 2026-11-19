@@ -1,8 +1,9 @@
 """Stock = somme des mouvements. Jamais un nombre modifié à la main."""
 
 from .clock import now_iso
-from .db import transaction
+from .db import log_audit, transaction
 from .errors import ValidationError
+from .users import require_permission
 
 MOVEMENT_TYPES = (
     "reception_achat", "vente", "retour_client", "retour_fournisseur",
@@ -55,11 +56,13 @@ def list_movements(conn, product_id: int | None = None):
 
 
 def inventory_count(conn, product_id: int, counted: int, note: str | None = None,
-                    warehouse_id: int = DEFAULT_WAREHOUSE, at: str | None = None):
+                    warehouse_id: int = DEFAULT_WAREHOUSE, at: str | None = None,
+                    actor_user_id: int | None = None):
     """Inventaire : on saisit la quantité comptée, le logiciel crée le mouvement de l'écart.
 
     Retourne l'identifiant du mouvement, ou None si le stock était déjà exact.
     """
+    require_permission(conn, actor_user_id, "inventory")
     if counted < 0:
         raise ValidationError("La quantité comptée ne peut pas être négative.")
     tracked = conn.execute("SELECT track_serial, name FROM products WHERE id = ?", (product_id,)).fetchone()
@@ -70,5 +73,12 @@ def inventory_count(conn, product_id: int, counted: int, note: str | None = None
     difference = counted - stock_of(conn, product_id, warehouse_id)
     if difference == 0:
         return None
-    return add_movement(conn, product_id, difference, "inventaire", warehouse_id=warehouse_id,
-                        note=(note or "").strip() or "Inventaire", at=at)
+    movement_id = add_movement(
+        conn, product_id, difference, "inventaire", warehouse_id=warehouse_id,
+        note=(note or "").strip() or "Inventaire", at=at,
+    )
+    log_audit(
+        conn, "inventaire_stock", "stock_movements", movement_id,
+        f"Produit {product_id} — quantité comptée {counted}", at, actor_user_id,
+    )
+    return movement_id

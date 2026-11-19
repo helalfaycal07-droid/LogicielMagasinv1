@@ -18,37 +18,44 @@ def normalize_phone(phone: str | None) -> str | None:
     """Contrôle un numéro algérien et le renvoie sous la forme 0XXXXXXXXX."""
     if phone is None or not phone.strip():
         return None
-    digits = re.sub(r"[\s.\-()]", "", phone)
+    digits = re.sub(r"[\s.\-/()]", "", phone)
     if digits.startswith("+213"):
-        digits = "0" + digits[4:]
+        digits = digits[4:]
     elif digits.startswith("00213"):
-        digits = "0" + digits[5:]
+        digits = digits[5:]
+    elif digits.startswith("213") and len(digits) in (12, 13):
+        digits = digits[3:]
+    if not digits.startswith("0") and len(digits) in (8, 9):
+        digits = "0" + digits
     if not (_MOBILE.match(digits) or _LANDLINE.match(digits)):
         raise ValidationError(
-            f"Numéro de téléphone invalide : {phone!r} (un mobile algérien a 10 chiffres, "
-            "par exemple 0551234567)."
+            f"Numéro de téléphone invalide : {phone!r}. Saisissez un mobile à 10 chiffres "
+            "(0551234567) ou un fixe à 9 chiffres (021234567), éventuellement précédé de +213."
         )
     return digits
 
 
 def create_customer(conn, name: str, phone: str | None = None, *, phone2: str | None = None,
-                    address: str | None = None, credit_allowed: bool = False,
+                    address: str | None = None, guarantor: str | None = None,
+                    credit_allowed: bool = False,
                     credit_limit_centimes: int | None = None, at: str | None = None) -> int:
     name = (name or "").strip()
     if not name:
         raise ValidationError("Le client a besoin d'un nom.")
     phone = normalize_phone(phone)
     phone2 = normalize_phone(phone2)
+    guarantor = (guarantor or "").strip() or None
     at = at or now_iso()
     with transaction(conn):
         code = next_number(conn, "CLI", 5)
         dossier = next_number(conn, "DOS", 5)
         cursor = conn.execute(
-            "INSERT INTO customers (code, dossier_number, name, phone, phone2, address, "
-            "credit_allowed, credit_limit_centimes, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-            (code, dossier, name, phone, phone2, address, int(credit_allowed),
+            "INSERT INTO customers (code, dossier_number, name, phone, phone2, address, guarantor, "
+            "credit_allowed, credit_limit_centimes, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (code, dossier, name, phone, phone2, address, guarantor, int(credit_allowed),
              credit_limit_centimes, at),
         )
+        
         customer_id = cursor.lastrowid
         log_audit(conn, "client_cree", "customers", customer_id, f"{code} / {dossier}", at)
     return customer_id
@@ -56,6 +63,42 @@ def create_customer(conn, name: str, phone: str | None = None, *, phone2: str | 
 
 def get_customer(conn, customer_id: int):
     return conn.execute("SELECT * FROM customers WHERE id = ?", (customer_id,)).fetchone()
+
+
+def delete_customer(conn, customer_id: int) -> bool:
+    """Supprime une fiche sans historique, sinon l'archive pour préserver la comptabilité.
+
+    Retourne True lorsque le client a été archivé, False lorsqu'il a été supprimé.
+    """
+    with transaction(conn):
+        customer = get_customer(conn, customer_id)
+        if customer is None:
+            raise ValidationError("Client introuvable.")
+
+        has_history = conn.execute(
+            """
+            SELECT
+                EXISTS(SELECT 1 FROM sales WHERE customer_id = :id)
+                OR EXISTS(SELECT 1 FROM customer_adjustments WHERE customer_id = :id)
+                OR EXISTS(SELECT 1 FROM customer_payments WHERE customer_id = :id)
+                OR EXISTS(SELECT 1 FROM payment_plans WHERE customer_id = :id)
+                OR EXISTS(SELECT 1 FROM cheques WHERE customer_id = :id)
+            AS value
+            """,
+            {"id": customer_id},
+        ).fetchone()["value"]
+        details = f"{customer['code']} — {customer['name']}"
+        if has_history:
+            conn.execute(
+                "UPDATE customers SET status = 'archive', credit_allowed = 0 WHERE id = ?",
+                (customer_id,),
+            )
+            log_audit(conn, "client_archive", "customers", customer_id, details)
+            return True
+
+        log_audit(conn, "client_supprime", "customers", customer_id, details)
+        conn.execute("DELETE FROM customers WHERE id = ?", (customer_id,))
+        return False
 
 
 def set_status(conn, customer_id: int, status: str, reason: str, at: str | None = None) -> None:
@@ -87,10 +130,15 @@ def customer_debt(conn, customer_id: int) -> int:
         """
         SELECT
           COALESCE((SELECT SUM(total_centimes) FROM sales
-                    WHERE customer_id = :c AND status = 'validee'), 0)
+                    WHERE customer_id = :c AND status IN ('validee', 'retournee')), 0)
         - COALESCE((SELECT SUM(sp.amount_centimes) FROM sale_payments sp
                     JOIN sales s ON s.id = sp.sale_id
-                    WHERE s.customer_id = :c AND s.status = 'validee'), 0)
+                    WHERE s.customer_id = :c AND s.status IN ('validee', 'retournee')), 0)
+        - COALESCE((SELECT SUM(ri.amount_centimes) FROM sale_return_items ri
+                    JOIN sale_returns r ON r.id = ri.return_id
+                    WHERE r.customer_id = :c), 0)
+        + COALESCE((SELECT SUM(refund_centimes) FROM sale_returns
+                    WHERE customer_id = :c), 0)
         + COALESCE((SELECT SUM(amount_centimes) FROM customer_adjustments WHERE customer_id = :c), 0)
         - COALESCE((SELECT SUM(amount_centimes) FROM customer_payments WHERE customer_id = :c), 0)
         AS debt

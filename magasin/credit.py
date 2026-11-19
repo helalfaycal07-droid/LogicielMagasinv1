@@ -35,42 +35,93 @@ def add_months(d: date, months: int) -> date:
 
 
 # ----------------------------------------------------------------- échéancier
+
 def create_plan(conn, sale_id: int, installment_count: int, first_due_date: date,
                 at: str | None = None) -> int:
     """Crée l'échéancier du reste dû d'une vente à crédit (la dernière mensualité absorbe l'arrondi)."""
     with transaction(conn):
-        sale = conn.execute("SELECT * FROM sales WHERE id = ?", (sale_id,)).fetchone()
-        if sale is None or sale["customer_id"] is None:
+        sale = conn.execute(
+            "SELECT * FROM sales WHERE id = ?", (sale_id,)
+        ).fetchone()
+
+        if sale is None or sale["customer_id"] is None or sale["status"] != "validee":
             raise ValidationError("Un échéancier exige une vente liée à un client identifié.")
-        if conn.execute("SELECT 1 FROM payment_plans WHERE sale_id = ?", (sale_id,)).fetchone():
+
+        customer = conn.execute(
+            "SELECT guarantor FROM customers WHERE id = ?",
+            (sale["customer_id"],),
+        ).fetchone()
+
+        guarantor = customer["guarantor"] if customer is not None else None
+
+        if conn.execute(
+            "SELECT 1 FROM payment_plans WHERE sale_id = ?", (sale_id,)
+        ).fetchone():
             raise ValidationError("Cette vente a déjà un échéancier.")
-        paid = conn.execute("SELECT COALESCE(SUM(amount_centimes),0) AS s FROM sale_payments WHERE sale_id = ?",
-                            (sale_id,)).fetchone()["s"]
-        principal = sale["total_centimes"] - paid
+
+        paid = conn.execute(
+            "SELECT COALESCE(SUM(amount_centimes),0) AS s "
+            "FROM sale_payments WHERE sale_id = ?",
+            (sale_id,),
+        ).fetchone()["s"]
+
+        allocations = conn.execute(
+            "SELECT COALESCE(SUM(amount_centimes), 0) "
+            "FROM payment_allocations WHERE sale_id = ?",
+            (sale_id,),
+        ).fetchone()[0]
+
+        returned = conn.execute(
+            "SELECT COALESCE(SUM(amount_centimes), 0) FROM sale_return_items "
+            "WHERE sale_item_id IN (SELECT id FROM sale_items WHERE sale_id = ?)",
+            (sale_id,),
+        ).fetchone()[0]
+
+        principal = sale["total_centimes"] - paid - allocations - returned
+
         if principal <= 0:
             raise ValidationError("Cette vente n'a pas de reste dû : pas d'échéancier à créer.")
+
         amounts = split_evenly(principal, installment_count)
+
         cursor = conn.execute(
-            "INSERT INTO payment_plans (sale_id, customer_id, principal_centimes, installment_count, "
-            "first_due_date, created_at) VALUES (?,?,?,?,?,?)",
-            (sale_id, sale["customer_id"], principal, installment_count,
-             first_due_date.isoformat(), at or now_iso()),
+            "INSERT INTO payment_plans (sale_id, customer_id, principal_centimes, "
+            "installment_count, first_due_date, created_at, guarantor) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                sale_id,
+                sale["customer_id"],
+                principal,
+                installment_count,
+                first_due_date.isoformat(),
+                at or now_iso(),
+                guarantor,
+            ),
         )
+
         plan_id = cursor.lastrowid
+
         for index, amount in enumerate(amounts):
             conn.execute(
-                "INSERT INTO installments (plan_id, number, due_date, amount_centimes) VALUES (?,?,?,?)",
+                "INSERT INTO installments (plan_id, number, due_date, amount_centimes) "
+                "VALUES (?,?,?,?)",
                 (plan_id, index + 1, add_months(first_due_date, index).isoformat(), amount),
             )
-        log_audit(conn, "echeancier_cree", "payment_plans", plan_id,
-                  f"{installment_count} x ~{format_da(amounts[0])}", at)
+
+        log_audit(
+            conn, "echeancier_cree", "payment_plans", plan_id,
+            f"{installment_count} x ~{format_da(amounts[0])}", at
+        )
+
     return plan_id
+
 
 
 def installment_status(row, today: date) -> str:
     """payee, en_retard, partielle ou a_venir."""
-    if row["paid_centimes"] >= row["amount_centimes"]:
-        return "payee"
+    effective_amount = row["amount_centimes"] - row["cancelled_centimes"]
+    if row["paid_centimes"] >= effective_amount:
+        return "annulee" if row["cancelled_centimes"] else "payee"
     if row["due_date"] < today.isoformat():
         return "en_retard"
     if row["paid_centimes"] > 0:
@@ -91,7 +142,8 @@ def list_installments(conn, plan_id: int | None = None, customer_id: int | None 
         sql += " AND p.customer_id = ?"
         args.append(customer_id)
     rows = conn.execute(sql + " ORDER BY i.due_date, i.plan_id, i.number", args).fetchall()
-    return [{**dict(r), "reste_centimes": r["amount_centimes"] - r["paid_centimes"],
+    return [{**dict(r), "montant_effectif_centimes": r["amount_centimes"] - r["cancelled_centimes"],
+             "reste_centimes": r["amount_centimes"] - r["paid_centimes"] - r["cancelled_centimes"],
              "status": installment_status(r, today)} for r in rows]
 
 
@@ -101,10 +153,14 @@ def _sales_with_balance(conn, customer_id: int) -> list[dict]:
         """
         SELECT s.id,
                s.total_centimes
+               - COALESCE((SELECT SUM(ri.amount_centimes)
+                           FROM sale_return_items ri
+                           JOIN sale_items si ON si.id = ri.sale_item_id
+                           WHERE si.sale_id = s.id), 0)
                - COALESCE((SELECT SUM(amount_centimes) FROM sale_payments WHERE sale_id = s.id), 0)
                - COALESCE((SELECT SUM(amount_centimes) FROM payment_allocations WHERE sale_id = s.id), 0)
                AS remaining
-        FROM sales s WHERE s.customer_id = ? AND s.status = 'validee' ORDER BY s.id
+        FROM sales s WHERE s.customer_id = ? AND s.status IN ('validee', 'retournee') ORDER BY s.id
         """, (customer_id,)).fetchall()
     return [dict(r) for r in rows if r["remaining"] > 0]
 
@@ -158,20 +214,23 @@ def record_payment(conn, customer_id: int, amount_centimes: int, method: str = "
             left = take_sale
             insts = conn.execute(
                 "SELECT i.* FROM installments i JOIN payment_plans p ON p.id = i.plan_id "
-                "WHERE p.sale_id = ? AND i.paid_centimes < i.amount_centimes ORDER BY i.due_date, i.number",
+                "WHERE p.sale_id = ? AND i.paid_centimes + i.cancelled_centimes < i.amount_centimes "
+                "ORDER BY i.due_date, i.number",
                 (sale["id"],)).fetchall()
             if installment_id is not None:
                 insts.sort(key=lambda r: 0 if r["id"] == installment_id else 1)
             for inst in insts:
                 if left == 0:
                     break
-                part = min(left, inst["amount_centimes"] - inst["paid_centimes"])
+                part = min(left, inst["amount_centimes"] - inst["paid_centimes"]
+                           - inst["cancelled_centimes"])
                 conn.execute("UPDATE installments SET paid_centimes = paid_centimes + ? WHERE id = ?",
                              (part, inst["id"]))
                 conn.execute(
                     "INSERT INTO payment_allocations (payment_id, sale_id, installment_id, amount_centimes) "
                     "VALUES (?,?,?,?)", (payment_id, sale["id"], inst["id"], part))
-                if part == inst["amount_centimes"] - inst["paid_centimes"]:
+                if part == (inst["amount_centimes"] - inst["paid_centimes"]
+                            - inst["cancelled_centimes"]):
                     _release_cheques(conn, inst["id"], at)
                 left -= part
             if left > 0:

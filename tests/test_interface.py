@@ -1,11 +1,16 @@
 """Tests de l'écran Produits et stock (sans écran physique). Ignorés si PySide6 n'est pas installé."""
 
 import os
+import tempfile
+import time
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
+    from PySide6.QtCore import QEvent, QEventLoop, QThreadPool, QTimer
     from PySide6.QtWidgets import QApplication, QDialog
     PYSIDE_OK = True
 except ImportError:  # pragma: no cover
@@ -30,6 +35,71 @@ class PageProduitsTests(unittest.TestCase):
 
     def test_la_liste_affiche_tous_les_produits(self):
         self.assertEqual(self.page.tableau.rowCount(), 6)
+
+    def test_navigation_pagine_le_tableau_et_actualise_l_indicateur(self):
+        from magasin.products import create_product
+
+        for index in range(55):
+            create_product(
+                self.conn, f"PAGE-{index:03}", f"Article paginé {index:03}", 100_000
+            )
+        self.page.page_size = 10
+        self.page.rafraichir()
+
+        self.assertEqual(self.page.tableau.rowCount(), 10)
+        self.assertIn("Page 1 / 7", self.page.indicateur_page.text())
+        self.assertFalse(self.page.bouton_precedent.isEnabled())
+        self.assertTrue(self.page.bouton_suivant.isEnabled())
+
+        self.page.page_suivante()
+
+        self.assertEqual(self.page.tableau.rowCount(), 10)
+        self.assertIn("Page 2 / 7", self.page.indicateur_page.text())
+        self.assertTrue(self.page.bouton_precedent.isEnabled())
+
+    def test_base_fichier_est_chargee_hors_du_thread_interface(self):
+        from interface.page_produits import PageProduits
+        from magasin.products import create_product, stock_report_page
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "pagination.db"
+            conn = connect(str(path))
+            create_product(conn, "ASYNC-1", "Produit asynchrone", 100_000)
+
+            def slow_report(*args, **kwargs):
+                time.sleep(0.1)
+                return stock_report_page(*args, **kwargs)
+
+            with patch("interface.page_produits.stock_report_page", slow_report):
+                page = PageProduits(conn)
+                self.assertEqual(page.indicateur_page.text(), "Chargement…")
+                self.assertEqual(len(page._chargements), 1)
+
+                loop = QEventLoop()
+                timeout = QTimer()
+                timeout.setSingleShot(True)
+                timeout.timeout.connect(loop.quit)
+                polling = QTimer()
+                polling.timeout.connect(
+                    lambda: loop.quit()
+                    if page.indicateur_page.text() != "Chargement…"
+                    else None
+                )
+                polling.start(10)
+                timeout.start(3000)
+                loop.exec()
+                polling.stop()
+
+            try:
+                self.assertNotEqual(page.indicateur_page.text(), "Chargement…")
+                self.assertIn("Page 1 / 1", page.indicateur_page.text())
+                self.assertEqual(page.tableau.rowCount(), 1)
+                self.assertTrue(QThreadPool.globalInstance().waitForDone(3000))
+            finally:
+                page.close()
+                page.deleteLater()
+                self.app.sendPostedEvents(None, QEvent.DeferredDelete)
+                conn.close()
 
     def test_le_stock_negatif_reste_visible(self):
         textes = [self.page.tableau.item(r, 6).text() for r in range(self.page.tableau.rowCount())]
@@ -58,13 +128,99 @@ class PageProduitsTests(unittest.TestCase):
         from PySide6.QtCore import Qt
         actifs = [self.fenetre.menu.item(i).text() for i in range(self.fenetre.menu.count())
                   if self.fenetre.menu.item(i).flags() & Qt.ItemIsEnabled]
-        self.assertEqual(actifs, ["Produits et stock", "Vente rapide"])
+        self.assertEqual(
+            actifs,
+            ["Produits et stock", "Vente rapide", "Retours", "Caisse", "Clients et crédit",
+             "Achats", "Rapports", "Sauvegarde", "Utilisateurs", "Fournisseurs", "Devis"],
+        )
+
+    def test_role_caissier_masque_les_ecrans_et_remises_reserves(self):
+        from PySide6.QtCore import Qt
+        from interface.fenetre_principale import FenetrePrincipale
+        from magasin.users import authenticate, create_first_admin, create_user
+
+        admin_id = create_first_admin(self.conn, "admin-ui", "MotDePasseAdminUI")
+        cashier_id = create_user(
+            self.conn, admin_id, "caisse-ui", "MotDePasseCaisseUI", "caissier"
+        )
+        user = authenticate(self.conn, "caisse-ui", "MotDePasseCaisseUI")
+        self.assertEqual(user["id"], cashier_id)
+        fenetre = FenetrePrincipale(self.conn, "Test rôle", current_user=user)
+        actifs = {
+            fenetre.menu.item(i).text()
+            for i in range(fenetre.menu.count())
+            if fenetre.menu.item(i).flags() & Qt.ItemIsEnabled
+        }
+
+        self.assertEqual(
+            actifs,
+            {"Produits et stock", "Vente rapide", "Caisse", "Clients et crédit", "Devis"},
+        )
+        self.assertFalse(fenetre.page_vente_rapide.remise.isEnabled())
 
     def test_vente_rapide_affiche_la_page_associee(self):
         from interface.page_vente_rapide import PageVenteRapide
         self.fenetre.menu.setCurrentRow(1)
         self.assertIsInstance(self.fenetre.pile.currentWidget(), PageVenteRapide)
         self.assertIs(self.fenetre.pile.currentWidget(), self.fenetre.page_vente_rapide)
+
+    def test_caisse_affiche_la_page_associee(self):
+        from interface.page_caisse import PageCaisse
+        self.fenetre.menu.setCurrentRow(3)
+        self.assertIsInstance(self.fenetre.pile.currentWidget(), PageCaisse)
+        self.assertIs(self.fenetre.pile.currentWidget(), self.fenetre.page_caisse)
+
+    def test_clients_affiche_la_page_associee(self):
+        from interface.page_clients import PageClients
+        self.fenetre.menu.setCurrentRow(4)
+        self.assertIsInstance(self.fenetre.pile.currentWidget(), PageClients)
+        self.assertIs(self.fenetre.pile.currentWidget(), self.fenetre.page_clients)
+
+    def test_achats_affiche_la_page_associee(self):
+        from interface.page_achats import PageAchats
+        self.fenetre.menu.setCurrentRow(5)
+        self.assertIsInstance(self.fenetre.pile.currentWidget(), PageAchats)
+        self.assertIs(self.fenetre.pile.currentWidget(), self.fenetre.page_achats)
+
+    def test_fournisseurs_affiche_la_page_associee(self):
+        from interface.page_fournisseurs import PageFournisseurs
+        self.fenetre.menu.setCurrentRow(9)
+        self.assertIsInstance(self.fenetre.pile.currentWidget(), PageFournisseurs)
+        self.assertIs(self.fenetre.pile.currentWidget(), self.fenetre.page_fournisseurs)
+
+    def test_devis_affiche_la_page_associee(self):
+        from interface.page_devis import PageDevis
+        self.fenetre.menu.setCurrentRow(10)
+        self.assertIsInstance(self.fenetre.pile.currentWidget(), PageDevis)
+        self.assertIs(self.fenetre.pile.currentWidget(), self.fenetre.page_devis)
+
+    def test_rapports_affiche_la_page_associee(self):
+        from interface.page_rapports import PageRapports
+        self.fenetre.menu.setCurrentRow(6)
+        self.assertIsInstance(self.fenetre.pile.currentWidget(), PageRapports)
+        self.assertIs(self.fenetre.pile.currentWidget(), self.fenetre.page_rapports)
+
+    def test_sauvegarde_affiche_la_page_associee(self):
+        from interface.page_sauvegarde import PageSauvegarde
+        self.fenetre.menu.setCurrentRow(7)
+        self.assertIsInstance(self.fenetre.pile.currentWidget(), PageSauvegarde)
+        self.assertIs(self.fenetre.pile.currentWidget(), self.fenetre.page_sauvegarde)
+
+    def test_restauration_recree_les_ecrans_pour_eviter_les_formulaires_perimes(self):
+        page_precedente = self.fenetre.page_vente_rapide
+        self.fenetre.menu.setCurrentRow(7)
+
+        self.fenetre._apres_restauration()
+
+        self.assertIsNot(self.fenetre.page_vente_rapide, page_precedente)
+        self.assertEqual(self.fenetre.pile.count(), self.fenetre.menu.count())
+        self.assertEqual(self.fenetre.pile.currentIndex(), 0)
+
+    def test_retours_affiche_la_page_associee(self):
+        from interface.page_retours import PageRetours
+        self.fenetre.menu.setCurrentRow(2)
+        self.assertIsInstance(self.fenetre.pile.currentWidget(), PageRetours)
+        self.assertIs(self.fenetre.pile.currentWidget(), self.fenetre.page_retours)
 
 
 if __name__ == "__main__":
@@ -129,7 +285,7 @@ class ModificationInterfaceTests(unittest.TestCase):
         from interface.dialogues import ModifierProduitDialogue
         self.page.tableau.selectRow(self.ligne_de("101"))
         produit = self.page._produit_selectionne()
-        dialogue = ModifierProduitDialogue(self.page, produit)
+        dialogue = ModifierProduitDialogue(self.page, produit, self.conn)
         self.assertEqual(dialogue.prix.text(), "39000")          # pré-rempli
         self.assertEqual(dialogue.reference.text(), "101")
         self.assertFalse(dialogue.avec_stock_initial)             # le stock ne se change pas ici

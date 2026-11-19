@@ -4,12 +4,14 @@ import sys
 import traceback
 from datetime import datetime
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 
 from magasin.paths import data_dir
+from magasin.users import has_users
 
 from .fenetre_principale import FenetrePrincipale
 from .outils import montrer_erreur
+from .security import FirstAdminDialog, LoginDialog, afficher_code_secours
 
 
 def installer_gestion_erreurs() -> None:
@@ -30,7 +32,16 @@ def installer_gestion_erreurs() -> None:
 def lancer(conn, titre: str, info: str) -> int:
     application = QApplication.instance() or QApplication(sys.argv)
     installer_gestion_erreurs()
-    fenetre = FenetrePrincipale(conn, titre, info)
+    creation_initiale = not has_users(conn)
+    if not creation_initiale:
+        connexion = LoginDialog(conn)
+    else:
+        connexion = FirstAdminDialog(conn)
+    if connexion.exec() != QDialog.DialogCode.Accepted:
+        return 0
+    if creation_initiale:
+        afficher_code_secours(None, connexion.recovery_code)
+    fenetre = FenetrePrincipale(conn, titre, info, current_user=connexion.user)
     fenetre.show()
     fenetre.raise_()
     fenetre.activateWindow()

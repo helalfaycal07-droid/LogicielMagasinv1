@@ -12,6 +12,7 @@ import re
 from .clock import now_iso
 from .db import log_audit, transaction
 from .errors import ValidationError
+from .users import require_permission
 from .stock import add_movement
 
 STATUSES = ("en_stock", "vendu", "retourne", "sorti")
@@ -123,9 +124,11 @@ def _require_tracked(conn, product_id: int):
 
 def add_units(conn, product_id: int, units: list[tuple[str, str | None]], *, movement_type: str = "inventaire",
               ref_type: str | None = None, ref_id: int | None = None, ref_number: str | None = None,
-              lot: str | None = None, note: str | None = None, warehouse_id: int = 1,
-              at: str | None = None) -> list[int]:
+              lot: str | None = None, counterparty: str | None = None,
+              note: str | None = None, warehouse_id: int = 1,
+              at: str | None = None, actor_user_id: int | None = None) -> list[int]:
     """Entre des smartphones en stock : (imei1, imei2 ou None) par appareil. Tout ou rien."""
+    require_permission(conn, actor_user_id, "inventory")
     if not units:
         raise ValidationError("Aucun appareil à enregistrer.")
     at = at or now_iso()
@@ -151,18 +154,22 @@ def add_units(conn, product_id: int, units: list[tuple[str, str | None]], *, mov
         ids = []
         for imei1, imei2 in cleaned:
             movement_id = add_movement(conn, product_id, 1, movement_type, lot=lot, ref_type=ref_type,
-                                       ref_id=ref_id, ref_number=ref_number, note=note or f"IMEI {imei1}",
+                                       ref_id=ref_id, ref_number=ref_number, counterparty=counterparty,
+                                       note=note or f"IMEI {imei1}",
                                        warehouse_id=warehouse_id, at=at)
             cursor = conn.execute(
                 "INSERT INTO product_serials (product_id, imei1, imei2, status, entry_movement_id, note, created_at) "
                 "VALUES (?,?,?, 'en_stock', ?,?,?)", (product_id, imei1, imei2, movement_id, note, at))
             ids.append(cursor.lastrowid)
-        log_audit(conn, "imei_entree", "products", product_id, f"{len(ids)} appareil(s) — {product['name']}", at)
+        log_audit(conn, "imei_entree", "products", product_id,
+                  f"{len(ids)} appareil(s) — {product['name']}", at, actor_user_id)
     return ids
 
 
-def remove_unit(conn, serial_id: int, reason: str, at: str | None = None) -> None:
+def remove_unit(conn, serial_id: int, reason: str, at: str | None = None,
+                actor_user_id: int | None = None) -> None:
     """Sort un appareil du stock (perdu, défectueux, erreur de saisie...). Une raison est obligatoire."""
+    require_permission(conn, actor_user_id, "inventory")
     if not (reason or "").strip():
         raise ValidationError("Une raison est obligatoire pour sortir un appareil du stock.")
     at = at or now_iso()
@@ -174,7 +181,8 @@ def remove_unit(conn, serial_id: int, reason: str, at: str | None = None) -> Non
             raise ValidationError("Seul un appareil en stock peut être sorti du stock.")
         add_movement(conn, unit["product_id"], -1, "ajustement", note=f"IMEI {unit['imei1']} : {reason.strip()}", at=at)
         conn.execute("UPDATE product_serials SET status = 'sorti', note = ? WHERE id = ?", (reason.strip(), serial_id))
-        log_audit(conn, "imei_sortie", "product_serials", serial_id, reason.strip(), at)
+        log_audit(conn, "imei_sortie", "product_serials", serial_id,
+                  reason.strip(), at, actor_user_id)
 
 
 def mark_sold(conn, serial_ids: list[int], sale_id: int, at: str) -> None:

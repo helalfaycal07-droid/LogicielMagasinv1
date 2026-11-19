@@ -4,4 +4,4 @@ Aucune dépendance externe : tout fonctionne avec Python seul.
 Les montants sont toujours des entiers en centimes (1 DA = 100 centimes).
 """
 
-__version__ = "0.1.0"
+__version__ = "0.3.3"

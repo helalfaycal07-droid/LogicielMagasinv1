@@ -7,6 +7,7 @@ from .db import log_audit, transaction
 from .errors import ValidationError
 from .money import margin_percent, markup_percent
 from .stock import add_movement, stock_of
+from .users import require_permission
 
 
 def create_product(conn, reference: str, name: str, price_centimes: int, *,
@@ -14,7 +15,9 @@ def create_product(conn, reference: str, name: str, price_centimes: int, *,
                    category: str | None = None, brand: str | None = None,
                    price_includes_tax: bool = True, tax_rate_bp: int = 1900,
                    min_stock: int = 0, track_serial: bool = False,
-                   initial_stock: int = 0, at: str | None = None) -> int:
+                   initial_stock: int = 0, at: str | None = None,
+                   actor_user_id: int | None = None) -> int:
+    require_permission(conn, actor_user_id, "manage_products")
     reference = (reference or "").strip()
     name = (name or "").strip()
     if not reference or not name:
@@ -36,7 +39,7 @@ def create_product(conn, reference: str, name: str, price_centimes: int, *,
         product_id = cursor.lastrowid
         if initial_stock:
             add_movement(conn, product_id, initial_stock, "inventaire", note="Stock initial", at=at)
-        log_audit(conn, "produit_cree", "products", product_id, reference, at)
+        log_audit(conn, "produit_cree", "products", product_id, reference, at, actor_user_id)
     return product_id
 
 
@@ -56,32 +59,42 @@ def get_product(conn, product_id: int):
 def find_product(conn, text: str):
     """Recherche par code-barres, référence exacte, puis par nom."""
     text = text.strip()
-    row = conn.execute("SELECT * FROM products WHERE barcode = ? OR reference = ?", (text, text)).fetchone()
-    if row:
-        return [row]
+    rows = conn.execute(
+        "SELECT * FROM products WHERE archived = 0 "
+        "AND (barcode = ? OR reference = ? COLLATE NOCASE) ORDER BY reference, id",
+        (text, text),
+    ).fetchall()
+    if rows:
+        return rows
     return conn.execute(
         "SELECT * FROM products WHERE archived = 0 AND name LIKE ? ORDER BY name", (f"%{text}%",)
     ).fetchall()
 
 
-def archive_product(conn, product_id: int, at: str | None = None) -> None:
+def archive_product(conn, product_id: int, at: str | None = None,
+                    actor_user_id: int | None = None) -> None:
     """Retire un produit de la liste sans rien effacer : son historique est conservé."""
+    require_permission(conn, actor_user_id, "manage_products")
     with transaction(conn):
         product = get_product(conn, product_id)
         if product is None:
             raise ValidationError("Produit introuvable.")
         conn.execute("UPDATE products SET archived = 1 WHERE id = ?", (product_id,))
-        log_audit(conn, "produit_archive", "products", product_id, f"{product['reference']} — {product['name']}", at)
+        log_audit(conn, "produit_archive", "products", product_id,
+                  f"{product['reference']} — {product['name']}", at, actor_user_id)
 
 
-def restore_product(conn, product_id: int, at: str | None = None) -> None:
+def restore_product(conn, product_id: int, at: str | None = None,
+                    actor_user_id: int | None = None) -> None:
     """Remet un produit archivé dans la liste."""
+    require_permission(conn, actor_user_id, "manage_products")
     with transaction(conn):
         product = get_product(conn, product_id)
         if product is None:
             raise ValidationError("Produit introuvable.")
         conn.execute("UPDATE products SET archived = 0 WHERE id = ?", (product_id,))
-        log_audit(conn, "produit_restaure", "products", product_id, f"{product['reference']} — {product['name']}", at)
+        log_audit(conn, "produit_restaure", "products", product_id,
+                  f"{product['reference']} — {product['name']}", at, actor_user_id)
 
 
 def product_usage(conn, product_id: int) -> dict:
@@ -101,12 +114,14 @@ def product_usage(conn, product_id: int) -> dict:
             "reasons": reasons, "deletable": not reasons}
 
 
-def delete_product(conn, product_id: int, at: str | None = None) -> None:
+def delete_product(conn, product_id: int, at: str | None = None,
+                   actor_user_id: int | None = None) -> None:
     """Supprime pour de bon un produit SANS historique (créé par erreur, essai...).
 
     Refusé dès qu'il y a une vente, un appareil IMEI ou un mouvement autre qu'un inventaire :
     il faut alors l'archiver. La suppression est écrite au journal.
     """
+    require_permission(conn, actor_user_id, "delete_product")
     with transaction(conn):
         product = get_product(conn, product_id)
         if product is None:
@@ -120,7 +135,8 @@ def delete_product(conn, product_id: int, at: str | None = None) -> None:
         conn.execute("DELETE FROM stock_movements WHERE product_id = ?", (product_id,))
         conn.execute("DELETE FROM products WHERE id = ?", (product_id,))
         log_audit(conn, "produit_supprime", "products", product_id,
-                  f"{product['reference']} — {product['name']} (stock au moment de la suppression : {stock})", at)
+                  f"{product['reference']} — {product['name']} (stock au moment de la suppression : {stock})",
+                  at, actor_user_id)
 
 
 def price_indicators(conn, product_id: int) -> dict:
@@ -153,16 +169,136 @@ def stock_report(conn, archived: bool = False) -> list[dict]:
     return report
 
 
+def stock_report_page(conn, *, page: int = 0, page_size: int = 50,
+                      archived: bool = False, search: str = "",
+                      low_stock_only: bool = False,
+                      select_product_id: int | None = None) -> dict:
+    """Fetch one stock-report page and catalog-wide totals with bounded product rows."""
+    if page < 0:
+        raise ValueError("page must be non-negative")
+    if page_size < 1:
+        raise ValueError("page_size must be positive")
+
+    cte = """
+        WITH product_stock AS (
+            SELECT p.*,
+                   COALESCE(SUM(m.quantity), 0) AS stock
+            FROM products p
+            LEFT JOIN stock_movements m
+                ON m.product_id = p.id AND m.warehouse_id = 1
+            WHERE p.archived = ?
+            GROUP BY p.id
+        )
+    """
+    escaped_search = search.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+    pattern = f"%{escaped_search}%"
+    filter_sql = """
+        (? = '' OR name LIKE ? ESCAPE '!' COLLATE NOCASE
+                OR reference LIKE ? ESCAPE '!' COLLATE NOCASE
+                OR COALESCE(barcode, '') LIKE ? ESCAPE '!' COLLATE NOCASE)
+        AND (? = 0 OR stock <= min_stock)
+    """
+    filter_args = (search, pattern, pattern, pattern, int(low_stock_only))
+    archived_value = int(archived)
+
+    summary = conn.execute(
+        cte + """
+        SELECT COUNT(*) AS product_count,
+               COALESCE(SUM(CASE WHEN stock < 0 THEN 1 ELSE 0 END), 0) AS negative_count,
+               COALESCE(SUM(CASE WHEN stock <= min_stock AND stock >= 0
+                                 THEN 1 ELSE 0 END), 0) AS low_count,
+               COALESCE(SUM(MAX(stock, 0) * cost_centimes), 0) AS stock_value
+        FROM product_stock
+        """,
+        (archived_value,),
+    ).fetchone()
+    total_count = conn.execute(
+        cte + f"SELECT COUNT(*) FROM product_stock WHERE {filter_sql}",
+        (archived_value, *filter_args),
+    ).fetchone()[0]
+
+    if select_product_id is not None:
+        selected = conn.execute(
+            cte + "SELECT name, id FROM product_stock WHERE id = ?",
+            (archived_value, select_product_id),
+        ).fetchone()
+        if selected is not None:
+            preceding = conn.execute(
+                cte + f"""
+                SELECT COUNT(*) FROM product_stock
+                WHERE {filter_sql} AND (name COLLATE NOCASE < ? COLLATE NOCASE
+                    OR (name COLLATE NOCASE = ? COLLATE NOCASE AND id < ?))
+                """,
+                (archived_value, *filter_args, selected["name"], selected["name"],
+                 selected["id"]),
+            ).fetchone()[0]
+            if preceding < total_count:
+                page = preceding // page_size
+
+    page_count = (total_count + page_size - 1) // page_size
+    page = min(page, max(page_count - 1, 0))
+    rows = conn.execute(
+        cte + f"""
+        SELECT product_stock.*,
+               (SELECT GROUP_CONCAT(s.name, ', ')
+                FROM product_suppliers ps
+                JOIN suppliers s ON s.id = ps.supplier_id
+                WHERE ps.product_id = product_stock.id) AS supplier_names
+        FROM product_stock
+        WHERE {filter_sql}
+        ORDER BY name COLLATE NOCASE, id
+        LIMIT ? OFFSET ?
+        """,
+        (archived_value, *filter_args, page_size, page * page_size),
+    ).fetchall()
+    report = []
+    for product in rows:
+        report.append({
+            "id": product["id"],
+            "reference": product["reference"],
+            "name": product["name"],
+            "barcode": product["barcode"] or "",
+            "category": product["category"] or "",
+            "brand": product["brand"] or "",
+            "price_centimes": product["price_centimes"],
+            "cost_centimes": product["cost_centimes"],
+            "tax_rate_bp": product["tax_rate_bp"],
+            "price_includes_tax": bool(product["price_includes_tax"]),
+            "track_serial": bool(product["track_serial"]),
+            "majoration_pct": markup_percent(
+                product["cost_centimes"], product["price_centimes"]
+            ),
+            "marge_pct": margin_percent(
+                product["cost_centimes"], product["price_centimes"]
+            ),
+            "stock": product["stock"],
+            "min_stock": product["min_stock"],
+            "negatif": product["stock"] < 0,
+            "bas": product["stock"] <= product["min_stock"],
+            "valeur_cout_centimes": max(product["stock"], 0) * product["cost_centimes"],
+            "supplier_names": product["supplier_names"] or "",
+        })
+    return {
+        "rows": report,
+        "page": page,
+        "page_count": page_count,
+        "total_count": total_count,
+        "summary": dict(summary),
+    }
+
+
 EDITABLE_FIELDS = ("reference", "name", "barcode", "category", "brand", "cost_centimes", "price_centimes",
                    "price_includes_tax", "tax_rate_bp", "min_stock", "track_serial")
 
 
-def update_product(conn, product_id: int, at: str | None = None, **changes) -> list[str]:
+def update_product(conn, product_id: int, at: str | None = None,
+                   actor_user_id: int | None = None, **changes) -> list[str]:
     """Corrige la fiche d'un produit. Le stock ne se modifie pas ici (utiliser l'inventaire).
 
     Chaque changement est écrit au journal (ancienne valeur -> nouvelle valeur).
     Retourne la liste des changements effectués (vide si rien n'a changé).
     """
+    require_permission(conn, actor_user_id, "manage_products")
     unknown = set(changes) - set(EDITABLE_FIELDS)
     if unknown:
         raise ValidationError(f"Champ non modifiable : {', '.join(sorted(unknown))}")
@@ -196,5 +332,6 @@ def update_product(conn, product_id: int, at: str | None = None, **changes) -> l
                     raise ValidationError(
                         "Cette référence ou ce code-barres existe déjà pour un autre produit.") from exc
         if done:
-            log_audit(conn, "produit_modifie", "products", product_id, " | ".join(done), at)
+            log_audit(conn, "produit_modifie", "products", product_id,
+                      " | ".join(done), at, actor_user_id)
     return done

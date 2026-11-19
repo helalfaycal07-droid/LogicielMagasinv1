@@ -43,10 +43,11 @@ def _remplir_appareils(tableau: QTableWidget, lignes: list[dict], avec_produit: 
 class AppareilsDialogue(QDialog):
     """Entrée des smartphones (IMEI1 + IMEI2 scannés) et liste des appareils d'un produit."""
 
-    def __init__(self, parent, conn, produit: dict):
+    def __init__(self, parent, conn, produit: dict, actor_user_id: int | None = None):
         super().__init__(parent)
         self.conn = conn
         self.produit = produit
+        self.actor_user_id = actor_user_id
         self.modifie = False
         self.en_attente: list[tuple[str, str | None]] = []
         self.setWindowTitle(f"Appareils (IMEI) — {produit['name']}")
@@ -241,7 +242,10 @@ class AppareilsDialogue(QDialog):
         if not self.en_attente:
             return False
         try:
-            add_units(self.conn, self.produit["id"], list(self.en_attente))
+            add_units(
+                self.conn, self.produit["id"], list(self.en_attente),
+                actor_user_id=self.actor_user_id,
+            )
         except Exception as erreur:
             montrer_erreur(self, erreur)
             return False
@@ -275,7 +279,10 @@ class AppareilsDialogue(QDialog):
         if boite.exec() != QDialog.Accepted:
             return
         try:
-            remove_unit(self.conn, serial_id, boite.textValue())
+            remove_unit(
+                self.conn, serial_id, boite.textValue(),
+                actor_user_id=self.actor_user_id,
+            )
         except Exception as erreur:
             montrer_erreur(self, erreur)
             return

@@ -207,6 +207,62 @@ class MigrationTests(unittest.TestCase):
             conn.execute("SELECT COUNT(*) FROM product_serials")  # la nouvelle table existe
             conn.close()
 
+    def test_une_base_de_la_version_3_recoit_la_migration_des_retours(self):
+        with tempfile.TemporaryDirectory() as dossier:
+            chemin = os.path.join(dossier, "version-3.db")
+            ancienne = sqlite3.connect(chemin, isolation_level=None)
+            ancienne.row_factory = sqlite3.Row
+            ancienne.executescript(
+                "BEGIN;\n" + db.MIGRATION_1 + "\nPRAGMA user_version = 1;\nCOMMIT;"
+            )
+            db._seed(ancienne)
+            for version, migration in enumerate(db.MIGRATIONS[1:3], start=2):
+                ancienne.executescript(
+                    "BEGIN;\n" + migration
+                    + f"\nPRAGMA user_version = {version};\nCOMMIT;"
+                )
+            ancienne.execute(
+                "INSERT INTO purchase_receipts "
+                "(number, supplier, total_centimes, created_at) VALUES (?,?,?,?)",
+                ("REC-OLD", "Ancien fournisseur", 5000, "2026-10-01T10:00:00+01:00"),
+            )
+            ancienne.close()
+
+            conn = connect(chemin)
+
+            self.assertEqual(
+                conn.execute("PRAGMA user_version").fetchone()[0], len(db.MIGRATIONS)
+            )
+            self.assertIsNotNone(conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sale_returns'"
+            ).fetchone())
+            columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(installments)")
+            }
+            self.assertIn("cancelled_centimes", columns)
+            sale_item_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(sale_items)")
+            }
+            self.assertIn("unit_cost_centimes", sale_item_columns)
+            sale_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(sales)")
+            }
+            self.assertIn("quote_id", sale_columns)
+            self.assertIsNotNone(conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'quotes'"
+            ).fetchone())
+            supplier = conn.execute(
+                "SELECT s.name, r.supplier_id FROM suppliers s "
+                "JOIN purchase_receipts r ON r.supplier_id = s.id "
+                "WHERE r.number = 'REC-OLD'"
+            ).fetchone()
+            self.assertEqual(supplier["name"], "Ancien fournisseur")
+            audit_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(audit_log)")
+            }
+            self.assertIn("actor_user_id", audit_columns)
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

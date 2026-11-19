@@ -8,6 +8,13 @@ class MagasinError(Exception):
 class ValidationError(MagasinError, ValueError):
     """Donnée saisie invalide."""
 
+class AuthenticationError(MagasinError):
+    """Connexion refusée ou compte indisponible."""
+
+
+class PermissionDenied(MagasinError):
+    """Action réservée à un rôle disposant de la permission requise."""
+
 
 class InsufficientStock(MagasinError):
     """Stock insuffisant alors que le réglage interdit la vente."""
