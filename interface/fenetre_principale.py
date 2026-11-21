@@ -206,7 +206,7 @@ class FenetrePrincipale(QMainWindow):
             self._aller_a("Vente rapide")
 
     def _apres_restauration(self) -> None:
-        if has_users(self.conn):
+        if has_users(self.conn)
             from .security import LoginDialog
 
             connexion = LoginDialog(self.conn, self)
