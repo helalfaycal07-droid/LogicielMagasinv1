@@ -4,10 +4,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QDialog, QFileDialog, QHBoxLayout, QLabel, QListWidget,
-                               QListWidgetItem, QMainWindow, QMessageBox, QStackedWidget,
-                               QVBoxLayout, QWidget)
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import (QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QListWidget,
+                               QListWidgetItem, QMainWindow, QMessageBox, QScrollArea,
+                               QStackedWidget, QVBoxLayout, QWidget)
 
 from .page_dashboard import PageDashboard
 from .page_caisse import PageCaisse
@@ -27,6 +27,7 @@ from magasin.clock import now
 from magasin.errors import MagasinError
 from magasin.paths import data_dir
 from magasin.users import can, has_users
+from version_checker import check_for_updates
 
 PAGE_DEMARRAGE = "Tableau de bord"
 
@@ -47,7 +48,12 @@ class FenetrePrincipale(QMainWindow):
         self.info_base = info_base
         self.setWindowTitle(titre)
         self.setStyleSheet(FEUILLE_DE_STYLE)
-        self.resize(1200, 700)  # tient dans un écran 1366x768
+
+        # Taille de départ adaptée à l'écran réellement disponible
+        # (on retire la barre des tâches Windows), sans jamais le dépasser.
+        ecran = self.screen().availableGeometry()
+        self.resize(min(1200, ecran.width()), min(700, ecran.height() - 40))
+        self.setMinimumSize(800, 500)
 
         self.entrees = self._definir_entrees()
 
@@ -83,6 +89,7 @@ class FenetrePrincipale(QMainWindow):
         if info_base:
             self._maj_statut()
         self._afficher_page_demarrage()
+        QTimer.singleShot(500, self._verifier_mise_a_jour)
 
     # ---------- définition unique des écrans ----------
 
@@ -124,7 +131,8 @@ class FenetrePrincipale(QMainWindow):
         raise KeyError(libelle)
 
     def _page(self, libelle: str) -> QWidget:
-        return self.pile.widget(self._index(libelle))
+        # La pile contient des zones de défilement ; la vraie page est à l'intérieur.
+        return self.pile.widget(self._index(libelle)).widget()
 
     def _aller_a(self, libelle: str) -> None:
         """Sélectionne une page et force son affichage, même si déjà sélectionnée."""
@@ -139,6 +147,19 @@ class FenetrePrincipale(QMainWindow):
 
     # ---------- construction ----------
 
+    def _envelopper(self, page: QWidget) -> QScrollArea:
+        """Met une page dans une zone de défilement.
+
+        Sans cela, une page trop large force toute la fenêtre à s'agrandir
+        et déborde de l'écran. Avec la zone de défilement, la fenêtre garde
+        sa taille et des barres de défilement apparaissent seulement si besoin.
+        """
+        zone = QScrollArea()
+        zone.setWidgetResizable(True)
+        zone.setFrameShape(QFrame.NoFrame)
+        zone.setWidget(page)
+        return zone
+
     def _construire_pages(self) -> None:
         while self.pile.count():
             page = self.pile.widget(0)
@@ -147,7 +168,7 @@ class FenetrePrincipale(QMainWindow):
 
         self.entrees = self._definir_entrees()
         for entree in self.entrees:
-            self.pile.addWidget(entree.creer())
+            self.pile.addWidget(self._envelopper(entree.creer()))
 
     def _appliquer_permissions(self) -> None:
         restreint = has_users(self.conn)
@@ -176,6 +197,9 @@ class FenetrePrincipale(QMainWindow):
         )
 
     # ---------- actions ----------
+
+    def _verifier_mise_a_jour(self) -> None:
+        check_for_updates(self, silent=True)
 
     def _charger_devis(self, quote_id: int) -> None:
         if self._page("Vente rapide").charger_devis(quote_id):
@@ -210,7 +234,7 @@ class FenetrePrincipale(QMainWindow):
         if not 0 <= ligne < self.pile.count():
             return
         self.pile.setCurrentIndex(ligne)
-        page = self.pile.widget(ligne)
+        page = self.pile.widget(ligne).widget()
         if hasattr(page, "rafraichir"):
             page.rafraichir()
 
